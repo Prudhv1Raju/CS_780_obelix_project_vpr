@@ -5,20 +5,19 @@ import numpy as np
 import torch
 import torch.nn as nn
  
-# ── constants ──────────────────────────────────────────────────────────────
+
 ACTIONS:    List[str] = ["L45", "L22", "FW", "R22", "R45"]
 FW_IDX:     int       = ACTIONS.index("FW")
 N_ACTIONS:  int       = len(ACTIONS)
 OBS_DIM:    int       = 18
 HIDDEN_DIM: int       = 128
  
-IR_IDX    = 16   # infrared sensor — box directly ahead
-STUCK_IDX = 17   # stuck flag — wall or boundary hit
+IR_IDX    = 16   
+STUCK_IDX = 17   
  
-TEMPERATURE = 0.5   # lower = more greedy, higher = more spread out
+TEMPERATURE = 0.5  
  
  
-# ── network (must match train_v7.py exactly) ───────────────────────────────
 class DRQN(nn.Module):
     def __init__(
         self,
@@ -55,7 +54,7 @@ class DRQN(nn.Module):
         return q, hx, cx
  
  
-# ── heuristic state ────────────────────────────────────────────────────────
+
 class HeuristicState:
     def __init__(self):
         self.turn_parity     = 0
@@ -63,8 +62,8 @@ class HeuristicState:
         self.turn_action     = None
         self.box_confirmed   = False
         self.ir_probe_active = False
-        self.fw_after_turn   = 0     # forced FW steps after turn completes
-        self.cooldown        = 0     # ignore stuck for N steps after escape
+        self.fw_after_turn   = 0    
+        self.cooldown        = 0     
  
  
 def _start_turn(hs: HeuristicState) -> str:
@@ -94,46 +93,42 @@ def heuristic_action(obs: np.ndarray, hs: HeuristicState) -> Optional[str]:
     ir    = int(obs[IR_IDX])
     stuck = int(obs[STUCK_IDX])
  
-    # 1. finish ongoing turn
     if hs.turn_steps_left > 0:
         hs.turn_steps_left -= 1
         return hs.turn_action
  
-    # 2. forced FW after turn — move away from wall
+
     if hs.fw_after_turn > 0:
         hs.fw_after_turn -= 1
         if hs.fw_after_turn == 0:
             hs.cooldown = 4
         return "FW"
  
-    # 3. cooldown — stuck flag may still linger, ignore it
     if hs.cooldown > 0:
         hs.cooldown -= 1
         return None
  
-    # 4. box-confirmed → drive to boundary
+
     if hs.box_confirmed:
         if stuck:
             hs.box_confirmed = False
             return _start_turn(hs)
         return "FW"
  
-    # 5. IR=1, not stuck → probe forward
     if ir and not stuck:
         hs.ir_probe_active = True
         return "FW"
  
-    # 6. IR probe active + now stuck → wall confirmed
+
     if hs.ir_probe_active and stuck:
         hs.ir_probe_active = False
         return _start_turn(hs)
  
-    # 7. stuck without IR → blind wall hit
     if stuck:
         hs.ir_probe_active = False
         return _start_turn(hs)
  
-    # 8. IR probe was active, IR dropped, not stuck → box attached
+
     if hs.ir_probe_active and not stuck and not ir:
         hs.ir_probe_active = False
         hs.box_confirmed   = True
@@ -142,7 +137,6 @@ def heuristic_action(obs: np.ndarray, hs: HeuristicState) -> Optional[str]:
     return None
  
  
-# ── module-level globals (persist across policy() calls) ───────────────────
 _model:    Optional[DRQN]           = None
 _hx:       Optional[torch.Tensor]   = None
 _cx:       Optional[torch.Tensor]   = None
@@ -155,7 +149,7 @@ def _load_once():
     if _model is not None:
         return
     here  = os.path.dirname(__file__)
-    wpath = os.path.join(here, "weights_m1.pth")
+    wpath = os.path.join(here, "weights_m_.pth")
     if not os.path.exists(wpath):
         raise FileNotFoundError(
             "weights.pth not found next to agent_template.py. "
@@ -194,41 +188,34 @@ def policy(obs: np.ndarray, rng: np.random.Generator) -> str:
  
     _load_once()
  
-    # detect episode boundary and reset state
     if _is_new_episode(obs):
         _reset_episode_state()
  
     _prev_obs = obs.copy()
  
-    # ── heuristic override ─────────────────────────────────────────────────
+
     override = heuristic_action(obs, _hs)
     if override is not None:
-        # still run network to keep LSTM hidden state updated
+
         obs_t        = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
         _, _hx, _cx  = _model(obs_t, _hx, _cx)
         _hx = _hx.detach()
         _cx = _cx.detach()
         return override
  
-    # ── pure softmax from Q-values, no bias ───────────────────────────────
+
     obs_t        = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
     q, _hx, _cx  = _model(obs_t, _hx, _cx)
     _hx = _hx.detach()
     
     _cx = _cx.detach()
  
-    # q_np     = q.squeeze(0).cpu().numpy()
-    # q_scaled = q_np / TEMPERATURE
-    # q_scaled -= q_scaled.max()     # numerical stability
-    # probs    = np.exp(q_scaled)
-    # probs   /= probs.sum()         # normalize
+    q_np     = q.squeeze(0).cpu().numpy()
+    q_scaled = q_np / TEMPERATURE
+    q_scaled -= q_scaled.max()     
+    probs    = np.exp(q_scaled)
+    probs   /= probs.sum()        
  
-    # action = int(rng.choice(N_ACTIONS, p=probs))
-    # return ACTIONS[action]
+    action = int(rng.choice(N_ACTIONS, p=probs))
+    return ACTIONS[action]
 
-    EVAL_EPS = 0.1
-    if rng.random() < EVAL_EPS:
-        return "FW"
-    else:
-        action = int(q.squeeze(0).argmax().item())
-        return ACTIONS[action]
